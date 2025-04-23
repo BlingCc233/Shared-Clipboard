@@ -32,7 +32,7 @@ type Claims struct {
 var db *gorm.DB
 var jwtKey = []byte("cc233_secret_key")
 
-const PASSWORD = "cc233"
+const PASSWORD = "yourpassword"
 
 func main() {
 	// 初始化数据库

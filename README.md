@@ -1,5 +1,17 @@
-# Vue 3 + TypeScript + Vite
+# 共享剪贴板
 
-This template should help get you started developing with Vue 3 and TypeScript in Vite. The template uses Vue 3 `<script setup>` SFCs, check out the [script setup docs](https://v3.vuejs.org/api/sfc-script-setup.html#sfc-script-setup) to learn more.
+> 前端基于Vite + Vue + TypeScript
 
-Learn more about the recommended Project Setup and IDE Support in the [Vue Docs TypeScript Guide](https://vuejs.org/guide/typescript/overview.html#project-setup).
+> 后端基于Go + Gin + Gorm + sqlite
+
+  <br/>
+
+## 一种基于轮询的跨平台剪贴板方案
+- 支持文本和图片共享
+- 支持拆词选择性复制
+
+  <br/>
+## 快速开始
+- 安装依赖 `npm install`
+- 启动后端 `go run main.go` 后端默认监听5859端口
+- 启动前端 `npm run dev` 前端默认监听5858端口
