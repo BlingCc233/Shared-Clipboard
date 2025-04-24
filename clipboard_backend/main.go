@@ -9,6 +9,7 @@ import (
 	"gorm.io/gorm"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -32,7 +33,7 @@ type Claims struct {
 var db *gorm.DB
 var jwtKey = []byte("cc233_secret_key")
 
-const PASSWORD = "yourpassword"
+const PASSWORD = "cc233"
 
 func main() {
 	// 初始化数据库
@@ -101,9 +102,31 @@ func main() {
 		// 获取所有剪贴板项目
 		api.GET("/clipboard", func(c *gin.Context) {
 			var items []ClipboardItem
-			db.Order("created_at DESC").Find(&items)
+			oldParam := c.Query("old")
 
-			// 将二进制图片数据转换为Base64返回给前端
+			var oldID uint64
+			if oldParam == "" {
+				// 如果 old 参数为空，获取数据库中最新的 id
+				var latestItem ClipboardItem
+				if err := db.Order("id DESC").First(&latestItem).Error; err != nil {
+					c.JSON(http.StatusNotFound, gin.H{"error": "No clipboard items found"})
+					return
+				}
+				oldID = uint64(latestItem.ID) + 1
+			} else {
+				// 将 old 参数转换为 uint
+				var err error
+				oldID, err = strconv.ParseUint(oldParam, 10, 32)
+				if err != nil {
+					c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid old parameter"})
+					return
+				}
+			}
+
+			// 查询小于 oldID 的前 10 条数据
+			db.Where("id < ?", oldID).Order("id DESC").Limit(10).Find(&items)
+
+			// 构造响应
 			var response []map[string]interface{}
 			for _, item := range items {
 				itemMap := map[string]interface{}{
@@ -113,13 +136,9 @@ func main() {
 					"type":       item.Type,
 					"createdAt":  item.CreatedAt,
 				}
-
 				if item.Type == "image" {
-					// 转换为base64
-					// 注意：在实际生产环境中，可能需要限制图片大小
 					itemMap["imageData"] = item.ImageData
 				}
-
 				response = append(response, itemMap)
 			}
 
@@ -168,26 +187,40 @@ func main() {
 			c.JSON(http.StatusCreated, item)
 		})
 
-		// Add a new route to get the latest clipboard item
 		api.GET("/clipboard/latest", func(c *gin.Context) {
-			var item ClipboardItem
-			// Query the latest item based on the created_at field
-			if err := db.Order("created_at DESC").First(&item).Error; err != nil {
-				c.JSON(http.StatusNotFound, gin.H{"error": "No clipboard items found"})
+			var items []ClipboardItem
+			newParam := c.Query("new")
+
+			if newParam == "" {
+				// 如果 new 参数为空，返回 400 错误码
+				c.JSON(http.StatusBadRequest, gin.H{"error": "Missing new parameter"})
 				return
 			}
 
-			// Prepare the response
-			response := map[string]interface{}{
-				"id":         item.ID,
-				"content":    item.Content,
-				"deviceInfo": item.DeviceInfo,
-				"type":       item.Type,
-				"createdAt":  item.CreatedAt,
+			// 将 new 参数转换为 uint
+			newID, err := strconv.ParseUint(newParam, 10, 32)
+			if err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid new parameter"})
+				return
 			}
 
-			if item.Type == "image" {
-				response["imageData"] = item.ImageData // Include image data if it's an image
+			// 查询大于 newID 的所有数据
+			db.Where("id > ?", newID).Order("id ASC").Find(&items)
+
+			// 构造响应
+			var response []map[string]interface{}
+			for _, item := range items {
+				itemMap := map[string]interface{}{
+					"id":         item.ID,
+					"content":    item.Content,
+					"deviceInfo": item.DeviceInfo,
+					"type":       item.Type,
+					"createdAt":  item.CreatedAt,
+				}
+				if item.Type == "image" {
+					itemMap["imageData"] = item.ImageData
+				}
+				response = append(response, itemMap)
 			}
 
 			c.JSON(http.StatusOK, response)
