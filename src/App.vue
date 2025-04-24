@@ -126,7 +126,7 @@
             <input type="checkbox" v-model="autoRefresh">
             <span class="slider round"></span>
           </label>
-          <button class="refresh-button" @click="fetchClipboardItems">
+          <button class="refresh-button" @click="fetchClipboardItems()">
             <span class="refresh-icon">🔄</span>
           </button>
         </div>
@@ -142,12 +142,12 @@
           <p class="empty-hint">添加内容后将显示在这里</p>
         </div>
 
-        <div v-else class="clipboard-list">
-          <div
+        <div v-else class="clipboard-list" :key="newestItemId?.toString() || 'defaultKey'">
+        <div
               v-for="(item, index) in clipboardItems"
               :key="item.id"
               class="clipboard-item"
-              :class="{ 'highlight': index < 1 }"
+              :class="{ 'highlighter': index < 1 }"
           >
             <div class="item-header">
               <div class="device-info">
@@ -187,7 +187,8 @@
                     v-for="(word, wordIndex) in wordSplitResults[index]"
                     :key="wordIndex"
                     class="word-chip"
-                    :class="{ selected: selectedWords[index]?.some(selected => selected.wordIndex === wordIndex) }"                    @click="toggleWordSelection(word, index, wordIndex)"
+                    :class="{ selected: selectedWords[index]?.some(selected => selected.wordIndex === wordIndex) }"
+                    @click="toggleWordSelection(word, index, wordIndex)"
                     :title="`点击选择: ${word}`"
                 >
                   {{ word }}
@@ -206,6 +207,13 @@
                 <span class="action-icon">🔍</span> 预览
               </button>
             </div>
+          </div>
+          <div v-if="loadingMore" class="load-more-spinner">
+            <div class="spinner"></div>
+            <span>加载更多...</span>
+          </div>
+          <div v-if="noMoreData && clipboardItems.length > 0" class="no-more-data">
+            没有更多数据了
           </div>
         </div>
       </div>
@@ -233,7 +241,6 @@ import axios from 'axios';
 const API_URL = `${import.meta.env.VITE_API_URL}${import.meta.env.VITE_APP_API_PORT ? `:${import.meta.env.VITE_APP_API_PORT}` : ''}`;
 
 
-
 interface ClipboardItem {
   id: number;
   content: string;
@@ -241,6 +248,13 @@ interface ClipboardItem {
   type: 'text' | 'image';
   imageData?: string;
   createdAt: string;
+}
+
+interface NegClipboardItem {
+  content: string;
+  deviceInfo: string;
+  type: 'text' | 'image';
+  imageData?: string;
 }
 
 export default defineComponent({
@@ -263,16 +277,24 @@ export default defineComponent({
     const activeTab = ref('text');
     const autoRefresh = ref(true);
     let refreshInterval: number | null = null;
-    const lastClipboardContent = ref<string | null>(null);
-    const lastSharedContent = ref<string | null>(null);
+    const lastSharedContent = ref<ClipboardItem | null>(null);
+    const lastSyncedContent = ref<NegClipboardItem>({
+      content: '',
+      deviceInfo: '',
+      type: 'text',
+    });
     const pollingInterval = ref<number | null>(null);
 
+    const oldestItemId = ref<number | null>(null);
+    const newestItemId = ref<number | null>(null);
+    const loadingMore = ref(false);
+    const noMoreData = ref(false);
 
     // 图片预览
     const imagePreviewModal = ref(false);
     const currentPreviewImage = ref('');
     const imagePreviewUrl = ref('');
-    const selectedWords = ref< Record<number, { word: string, wordIndex: number }[]>>({});
+    const selectedWords = ref<Record<number, { word: string, wordIndex: number }[]>>({});
 
 
     // 设备类型检测
@@ -339,6 +361,7 @@ export default defineComponent({
     onMounted(async () => {
       // 设置自动检测的设备名称
       deviceInfo.value = detectDeviceType();
+      lastSyncedContent.value.deviceInfo = deviceInfo.value;
 
       const savedToken = localStorage.getItem('clipboard_token');
       const savedDevice = localStorage.getItem('clipboard_device');
@@ -356,6 +379,9 @@ export default defineComponent({
           // 尝试获取系统剪贴板（仅在支持的浏览器中）
           await tryReadClipboard();
           startPolling();
+
+          // 设置滚动监听
+          setupScrollListener();
         } else {
           // Token已过期，清除本地存储
           localStorage.removeItem('clipboard_token');
@@ -364,40 +390,42 @@ export default defineComponent({
         }
       }
 
-      // 设置定时刷新
-      setupRefreshInterval();
     });
 
     // 监听自动刷新开关
     watch(autoRefresh, (newValue) => {
       if (newValue) {
-        setupRefreshInterval();
-      } else if (refreshInterval !== null) {
-        clearInterval(refreshInterval);
-        refreshInterval = null;
+        startPolling();
+      } else if (pollingInterval.value !== null) {
+        clearInterval(pollingInterval.value);
+        pollingInterval.value = null;
       }
     });
 
     // 设置刷新间隔
-    const setupRefreshInterval = () => {
-      if (autoRefresh.value && refreshInterval === null) {
-        refreshInterval = window.setInterval(() => {
-          if (isAuthenticated.value) {
-            fetchClipboardItems(); // 只刷新剪贴板历史记录
-          }
-        }, 1000);
-      }
-    };
+    // const setupRefreshInterval = () => {
+    //   if (autoRefresh.value && refreshInterval === null) {
+    //     refreshInterval = window.setInterval(() => {
+    //       if (isAuthenticated.value) {
+    //         fetchClipboardItems(); // 只刷新剪贴板历史记录
+    //       }
+    //     }, 1000);
+    //   }
+    // };
 
     // 启动轮询
     const startPolling = () => {
-      if (pollingInterval.value === null) {
-        pollingInterval.value = window.setInterval(async () => {
-          await fetchLastSharedContent(); // 定期更新共享剪贴板的最新记录
-          await checkClipboard();
-        }, 1000); // 每秒检查一次
-      }
-    };
+            if (autoRefresh.value && pollingInterval.value === null) {
+              pollingInterval.value = window.setInterval(async () => {
+                if (isAuthenticated.value) {
+                  await fetchLastSharedContent(); // 定期更新共享剪贴板的最新记录
+                  await checkClipboard();
+                }
+              }, 3000);
+
+            }
+        }
+    ;
 
     // 停止轮询
     const stopPolling = () => {
@@ -405,6 +433,27 @@ export default defineComponent({
         clearInterval(pollingInterval.value);
         pollingInterval.value = null;
       }
+    };
+
+    const setupScrollListener = () => {
+      const handleScroll = () => {
+        if (noMoreData.value || loadingMore.value) return;
+
+        const scrollPosition = window.innerHeight + window.pageYOffset;
+        const documentHeight = document.documentElement.offsetHeight;
+
+        // 当滚动到距离底部100px时，加载更多
+        if (documentHeight - scrollPosition < 100) {
+          fetchClipboardItems(true);
+        }
+      };
+
+      window.addEventListener('scroll', handleScroll);
+
+      // 组件卸载时移除监听
+      onUnmounted(() => {
+        window.removeEventListener('scroll', handleScroll);
+      });
     };
 
     // 组件销毁时清除定时器
@@ -464,6 +513,7 @@ export default defineComponent({
         const text = await navigator.clipboard.readText();
         if (text && text.trim() !== '') {
           newClipboardContent.value = text;
+          lastSyncedContent.value.content = text;
         }
       } catch (error) {
         console.log('Cannot read clipboard, may need permission:', error);
@@ -471,18 +521,56 @@ export default defineComponent({
     };
 
     // 获取剪贴板项目
-    const fetchClipboardItems = async () => {
+    const fetchClipboardItems = async (loadMore = false) => {
       if (!isAuthenticated.value) return;
 
+      if (loadMore && loadingMore.value) return; // 防止重复加载
+
+      if (loadMore) {
+        loadingMore.value = true;
+      } else if (!loadMore) {
+        loading.value = true;
+      }
+
       try {
-        const response = await axios.get(`${API_URL}/api/clipboard`, {
+        let url = `${API_URL}/api/clipboard`;
+
+        // 如果是加载更多，传递oldestItemId作为参数
+        if (loadMore && oldestItemId.value) {
+          url += `?old=${oldestItemId.value}`;
+        }
+
+        const response = await axios.get(url, {
           headers: {
             Authorization: `Bearer ${token.value}`,
           },
         });
 
-        // 只更新剪贴板历史记录
-        clipboardItems.value = response.data;
+        // 处理响应数据
+        if (response.data && response.data.length > 0) {
+          if (loadMore) {
+            // 追加到已有数据的末尾
+            clipboardItems.value = [...clipboardItems.value, ...response.data];
+          } else {
+            // 初始加载，直接覆盖
+            clipboardItems.value = response.data;
+          }
+
+          // 更新最旧和最新的ID
+          if (clipboardItems.value.length > 0) {
+            const sortedItems = [...clipboardItems.value].sort((a, b) => a.id - b.id);
+            oldestItemId.value = sortedItems[0].id;
+            newestItemId.value = sortedItems[sortedItems.length - 1].id;
+          }
+
+          // 检查是否没有更多数据
+          if (loadMore && response.data.length === 0) {
+            noMoreData.value = true;
+          }
+        } else if (loadMore) {
+          // 如果加载更多但没有数据返回
+          noMoreData.value = true;
+        }
       } catch (error) {
         console.error('Error fetching clipboard items:', error);
 
@@ -492,6 +580,12 @@ export default defineComponent({
           localStorage.removeItem('clipboard_token');
           localStorage.removeItem('clipboard_device');
           localStorage.removeItem('clipboard_token_expiry');
+        }
+      } finally {
+        if (loadMore) {
+          loadingMore.value = false;
+        } else {
+          loading.value = false;
         }
       }
     };
@@ -548,7 +642,7 @@ export default defineComponent({
         }
 
         // 重新获取剪贴板项目
-        fetchClipboardItems();
+        await fetchLastSharedContent();
       } catch (error) {
         console.error('Error adding to clipboard:', error);
       }
@@ -566,9 +660,10 @@ export default defineComponent({
         for (const item of clipboardItems) {
           if (item.types.includes('text/plain')) {
             const text = await item.getType('text/plain').then((blob) => blob.text());
-            if (text !== lastClipboardContent.value && text !== lastSharedContent.value) {
-              lastClipboardContent.value = text;
-              await syncClipboardContent({ type: 'text', deviceInfo: deviceInfo.value, content: text });
+            if (text !== lastSharedContent.value?.content && text !== lastSyncedContent.value?.content) {
+              lastSyncedContent.value.content = text;
+              lastSyncedContent.value.type = 'text';
+              await syncClipboardContent(lastSyncedContent.value);
             }
           } else if (item.types.includes('image/png')) {
             const imageBlob = await item.getType('image/png');
@@ -576,9 +671,11 @@ export default defineComponent({
             reader.onload = async () => {
               const base64Image = reader.result as string;
               const cleanedBase64Image = base64Image.replace(/^data:image\/png;base64,/, '');
-              if (cleanedBase64Image !== lastClipboardContent.value && cleanedBase64Image !== lastSharedContent.value) {
-                lastClipboardContent.value = cleanedBase64Image;
-                await syncClipboardContent({ content: `${Math.floor(Math.random() * 1e7)}.png`, type: 'image', deviceInfo: deviceInfo.value, imageData: cleanedBase64Image });
+              if (lastSharedContent.value && (cleanedBase64Image !== lastSharedContent.value.imageData) && lastSyncedContent.value && (cleanedBase64Image !== lastSyncedContent.value.imageData)) {
+                lastSyncedContent.value.content = `${Math.floor(Math.random() * 1e7)}.png`;
+                lastSyncedContent.value.imageData = cleanedBase64Image;
+                lastSyncedContent.value.type = 'image';
+                await syncClipboardContent(lastSyncedContent.value);
               }
             };
             reader.readAsDataURL(imageBlob);
@@ -591,25 +688,47 @@ export default defineComponent({
 
     // 获取共享剪贴板的最新记录
     const fetchLastSharedContent = async () => {
+      if (!isAuthenticated.value || !newestItemId.value) return;
+
       try {
-        const response = await axios.get(`${API_URL}/api/clipboard/latest`, {
+        const response = await axios.get(`${API_URL}/api/clipboard/latest?new=${newestItemId.value}`, {
           headers: {
-            Authorization: `Bearer ${localStorage.getItem('clipboard_token')}`,
+            Authorization: `Bearer ${token.value}`,
           },
         });
-        if (response.data && response.data.content) {
-          lastSharedContent.value = response.data.content;
-          if(response.data.type === 'image'){
-            lastSharedContent.value = response.data.imageData;
+
+        // 如果有新数据，添加到顶部
+        if (response.data && response.data.length > 0) {
+          // 添加新数据到顶部
+          clipboardItems.value = [...response.data, ...clipboardItems.value];
+
+          // 更新最新ID
+          const sortedItems = [...clipboardItems.value].sort((a, b) => b.id - a.id);
+          newestItemId.value = sortedItems[0].id;
+          lastSharedContent.value = sortedItems[0];
+
+          // 如果是首次加载，也更新最旧ID
+          if (!oldestItemId.value && sortedItems.length > 0) {
+            oldestItemId.value = sortedItems[sortedItems.length - 1].id;
           }
         }
+        else{
+          const sortedItems = [...clipboardItems.value].sort((a, b) => b.id - a.id);
+          newestItemId.value = sortedItems[0].id;
+          lastSharedContent.value = sortedItems[0];
+        }
       } catch (error) {
-        console.error('Error fetching last shared content:', error);
+        console.error('Error fetching latest shared content:', error);
       }
     };
 
     // 同步剪贴板内容到共享服务
-    const syncClipboardContent = async (data: { type: 'text' | 'image'; content: string; deviceInfo?: string; imageData?: string;}) => {
+    const syncClipboardContent = async (data: {
+      type: 'text' | 'image';
+      content: string;
+      deviceInfo: string;
+      imageData?: string;
+    }) => {
       try {
         await axios.post(`${API_URL}/api/clipboard`, data, {
           headers: {
@@ -617,7 +736,6 @@ export default defineComponent({
           },
         });
         console.log('Clipboard content synced:', data);
-        lastSharedContent.value = data.content; // 更新最新共享内容
       } catch (error) {
         console.error('Error syncing clipboard content:', error);
       }
@@ -690,7 +808,7 @@ export default defineComponent({
     const splitAndShowWords = async (text: string, index: number) => {
       try {
         const response = await axios.post(`${API_URL}/api/split-words`,
-            { text },
+            {text},
             {
               headers: {
                 'Authorization': `Bearer ${token.value}`
@@ -708,7 +826,7 @@ export default defineComponent({
         console.error('Error splitting words:', error);
 
         // 如果API调用失败，使用本地分词方法作为后备
-        const pattern = /([a-zA-Z]+|[0-9]+|[\u4e00-\u9fa5]+|[\p{Punctuation}])/gu;
+        const pattern = /([a-zA-Z]+|[0-9]+|[\u4e00-\u9fa5]+|[\p{Punctuation}]|[\p{Emoji}]|[\p{Script=Hiragana}]|[\p{Script=Katakana}]|[\p{Script=Han}])/gu;
         const matches = text.match(pattern) || [];
 
         wordSplitResults.value = {
@@ -732,7 +850,7 @@ export default defineComponent({
         selectedWords.value[index].splice(existingIndex, 1);
       } else {
         // Add the word and sort by wordIndex
-        selectedWords.value[index].push({ word, wordIndex });
+        selectedWords.value[index].push({word, wordIndex});
         selectedWords.value[index].sort((a, b) => a.wordIndex - b.wordIndex);
       }
     };
@@ -824,6 +942,11 @@ export default defineComponent({
       selectedWords,
       toggleWordSelection,
       copyMergedWords,
+      oldestItemId,
+      newestItemId,
+      loadingMore,
+      noMoreData,
+      setupScrollListener,
 
       // 设备图标
       getDeviceIconClass,
@@ -861,6 +984,7 @@ export default defineComponent({
 
 * {
   box-sizing: border-box;
+  outline: none;
   margin: 0;
   padding: 0;
 }
@@ -872,6 +996,7 @@ body {
   line-height: 1.6;
   margin: 0;
   padding: 0;
+  width: 100%;
 }
 
 .container {
@@ -906,13 +1031,23 @@ h2 {
   display: flex;
   align-items: center;
   background-color: var(--highlight-color);
-  padding: 5px 12px;
-  border-radius: 20px;
+  padding: 7px 15px;
+  border-radius: 10px;
   font-size: 14px;
   color: var(--primary-dark);
 }
 
 .device-icon {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  margin-right: 8px;
+  background-size: contain;
+  background-repeat: no-repeat;
+  background-position: center;
+}
+
+.device-badge .device-icon{
   display: inline-block;
   width: 20px;
   height: 20px;
@@ -1095,6 +1230,8 @@ h2 {
   height: 3px;
   background-color: var(--primary-color);
 }
+
+
 
 .tab-icon {
   margin-right: 8px;
@@ -1360,7 +1497,7 @@ input:checked + .slider:before {
   box-shadow: 0 5px 15px rgba(0, 0, 0, 0.08);
 }
 
-.clipboard-item.highlight {
+.clipboard-item.highlighter {
   border-color: var(--primary-color);
   background-color: var(--highlight-color);
 }
@@ -1370,7 +1507,7 @@ input:checked + .slider:before {
   justify-content: space-between;
   align-items: center;
   margin-bottom: 12px;
-  padding-bottom: 10px;
+  padding-bottom: 7px;
   border-bottom: 1px solid var(--border-color);
 }
 
@@ -1378,12 +1515,13 @@ input:checked + .slider:before {
   display: flex;
   align-items: center;
   font-weight: 500;
+  font-size: 14px;
   color: var(--primary-color);
 }
 
 .timestamp {
   color: var(--light-text);
-  font-size: 14px;
+  font-size: 12px;
 }
 
 .item-content {
@@ -1393,7 +1531,7 @@ input:checked + .slider:before {
 
 .text-content {
   white-space: pre-wrap;
-  line-height: 1.6;
+  line-height: 1.3;
   font-size: 15px;
   color: var(--text-color);
   max-height: 300px;
@@ -1419,8 +1557,32 @@ input:checked + .slider:before {
 
 .item-actions {
   display: flex;
+  flex-direction: row-reverse;
   flex-wrap: wrap;
-  gap: 10px;
+  gap: 14px;
+}
+
+.load-more-spinner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 20px 0;
+  color: var(--light-text);
+}
+
+.load-more-spinner .spinner {
+  width: 30px;
+  height: 30px;
+  border: 2px solid rgba(52, 152, 219, 0.2);
+  border-top-color: var(--primary-color);
+  margin-bottom: 8px;
+}
+
+.no-more-data {
+  text-align: center;
+  padding: 20px 0;
+  color: var(--light-text);
+  font-size: 14px;
 }
 
 .action-button {
@@ -1594,6 +1756,14 @@ input:checked + .slider:before {
   .action-buttons button {
     width: 100%;
   }
+
+  .action-button{
+    padding: 4px 12px;
+    border-radius: 15px;
+    font-size: 13px;
+  }
+
+
 }
 
 @media (max-width: 480px) {
@@ -1605,6 +1775,10 @@ input:checked + .slider:before {
     font-size: 18px;
   }
 
+  .container{
+    padding: 0;
+  }
+
   .app-header {
     flex-direction: column;
     align-items: flex-start;
@@ -1613,10 +1787,21 @@ input:checked + .slider:before {
 
   .device-badge {
     align-self: flex-start;
+    padding: 4px 12px;
+    border-radius: 15px;
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--primary-dark);
+  }
+
+  .device-badge .device-icon{
+    width: 15px;
+    height: 15px;
   }
 
   .tabs {
-    flex-direction: column;
+    flex-direction: row;
+    gap: 10px;
     border-bottom: none;
   }
 
@@ -1631,6 +1816,12 @@ input:checked + .slider:before {
 
   .tab-button.active {
     background-color: var(--highlight-color);
+  }
+
+  .action-button{
+    padding: 3px 10px;
+    border-radius: 15px;
+    font-size: 11px;
   }
 
 }
