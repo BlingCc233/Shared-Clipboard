@@ -199,7 +199,7 @@
               </div>
             </div>
 
-            <div v-if="index < 3 && item.type === 'image'" class="item-actions">
+            <div v-if="item.type === 'image'" class="item-actions">
               <button class="action-button" @click="downloadImage(item.imageData)" title="下载图片">
                 <span class="action-icon">💾</span> 下载
               </button>
