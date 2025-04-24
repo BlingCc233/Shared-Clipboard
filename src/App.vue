@@ -664,6 +664,7 @@ export default defineComponent({
               lastSyncedContent.value.content = text;
               lastSyncedContent.value.type = 'text';
               await syncClipboardContent(lastSyncedContent.value);
+              await fetchLastSharedContent();
             }
           } else if (item.types.includes('image/png')) {
             const imageBlob = await item.getType('image/png');
@@ -676,6 +677,7 @@ export default defineComponent({
                 lastSyncedContent.value.imageData = cleanedBase64Image;
                 lastSyncedContent.value.type = 'image';
                 await syncClipboardContent(lastSyncedContent.value);
+                await fetchLastSharedContent();
               }
             };
             reader.readAsDataURL(imageBlob);
@@ -807,6 +809,10 @@ export default defineComponent({
     // 修改前端的splitAndShowWords函数
     const splitAndShowWords = async (text: string, index: number) => {
       try {
+        if(wordSplitResults.value[index].length > 0){
+          wordSplitResults.value[index] = [];
+          return;
+        }
         const response = await axios.post(`${API_URL}/api/split-words`,
             {text},
             {
@@ -826,7 +832,7 @@ export default defineComponent({
         console.error('Error splitting words:', error);
 
         // 如果API调用失败，使用本地分词方法作为后备
-        const pattern = /([a-zA-Z]+|[0-9]+|[\u4e00-\u9fa5]+|[\p{Punctuation}]|[\p{Emoji}]|[\p{Script=Hiragana}]|[\p{Script=Katakana}]|[\p{Script=Han}])/gu;
+        const pattern = /([a-zA-Z]+|[0-9]+|[\u4e00-\u9fa5]+|[\p{Punctuation}]+|[\p{Emoji}]+|[\p{Script=Hiragana}]+|[\p{Script=Katakana}]+|[\p{Script=Han}]+)/gu;
         const matches = text.match(pattern) || [];
 
         wordSplitResults.value = {
@@ -1534,6 +1540,7 @@ input:checked + .slider:before {
   line-height: 1.3;
   font-size: 15px;
   color: var(--text-color);
+  text-align: left;
   max-height: 300px;
   overflow-y: auto;
 }
@@ -1612,7 +1619,7 @@ input:checked + .slider:before {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
-  margin-top: 15px;
+  margin-top: 10px;
   width: 100%;
   padding: 10px;
   background-color: #f8f9fa;
@@ -1622,6 +1629,7 @@ input:checked + .slider:before {
 .word-chip {
   display: inline-flex;
   background-color: white;
+  outline: none;
   border: 1px solid var(--primary-color);
   border-radius: 20px;
   padding: 4px 12px;
@@ -1629,11 +1637,6 @@ input:checked + .slider:before {
   cursor: pointer;
   transition: background-color 0.2s, color 0.2s;
   white-space: nowrap;
-}
-
-.word-chip:hover {
-  background-color: var(--primary-color);
-  color: white;
 }
 
 /* 图片预览模态框 */
@@ -1824,5 +1827,17 @@ input:checked + .slider:before {
     font-size: 11px;
   }
 
-}
+  .split-words{
+    gap:5px;
+    margin-top: 0;
+  }
+
+  .word-chip{
+    border-radius: 20px;
+    padding: 2px 10px;
+    font-size: 12px;
+  }
+
+
+  }
 </style>
