@@ -126,7 +126,7 @@
             <input type="checkbox" v-model="autoRefresh">
             <span class="slider round"></span>
           </label>
-          <button class="refresh-button" @click="fetchClipboardItems()">
+          <button class="refresh-button" @click="reload">
             <span class="refresh-icon">🔄</span>
           </button>
         </div>
@@ -464,6 +464,11 @@ export default defineComponent({
       stopPolling();
     });
 
+    const reload = () => {
+      window.location.reload();
+      return;
+    };
+
     // 认证
     const authenticate = async () => {
       if (!deviceInfo.value || !password.value) {
@@ -656,6 +661,9 @@ export default defineComponent({
       }
 
       try {
+        if (!document.hasFocus()) {
+          return; // 如果文档没有焦点，直接返回不尝试读取剪贴板
+        }
         const clipboardItems = await navigator.clipboard.read();
         for (const item of clipboardItems) {
           if (item.types.includes('text/plain')) {
@@ -925,6 +933,8 @@ export default defineComponent({
       authenticate,
       deviceIconClass,
       fetchClipboardItems,
+
+      reload,
 
       // 剪贴板相关
       clipboardItems,
