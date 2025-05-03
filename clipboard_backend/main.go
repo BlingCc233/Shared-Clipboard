@@ -2,6 +2,8 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"github.com/dgrijalva/jwt-go"
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
@@ -9,10 +11,9 @@ import (
 	"gorm.io/gorm"
 	"log"
 	"net/http"
+	"regexp"
 	"strconv"
-	"strings"
 	"time"
-	"unicode"
 )
 
 // 模型定义
@@ -31,9 +32,11 @@ type Claims struct {
 }
 
 var db *gorm.DB
-var jwtKey = []byte("yoursecretkey")
+var jwtKey = []byte("secret_key")
 
 const PASSWORD = "yourpassword"
+
+var wordSplitRegex = regexp.MustCompile(`[a-zA-Z]+|[0-9]+|\p{Han}+|\p{Hiragana}+|\p{Katakana}+`)
 
 func main() {
 	// 初始化数据库
@@ -225,6 +228,8 @@ func main() {
 
 			c.JSON(http.StatusOK, response)
 		})
+
+		api.GET("/is_exist", handleIsExist)
 	}
 
 	router.Run("0.0.0.0:5859")
@@ -257,92 +262,69 @@ func authMiddleware() gin.HandlerFunc {
 }
 
 func splitWords(text string) []string {
-	var result []string
-	var currentWord strings.Builder
-	var currentType rune // 0: 未知, 1: 中文, 2: 英文, 3: 数字, 4: 其他
+	matches := wordSplitRegex.FindAllString(text, -1) // -1 表示查找所有匹配项
+	if matches == nil {
+		return []string{} // 如果没有匹配项，返回空切片
+	}
+	return matches
+}
 
-	for _, char := range text {
-		var charType rune
-
-		switch {
-		case unicode.Is(unicode.Han, char):
-			charType = 1 // 中文
-		case unicode.IsLetter(char):
-			charType = 2 // 英文
-		case unicode.IsDigit(char):
-			charType = 3 // 数字
-		default:
-			charType = 4 // 其他
-		}
-
-		// 如果类型改变或者是中文字符，则当前单词结束
-		if currentType != 0 && (currentType != charType || charType == 1) {
-			// 处理中文词组：如果当前是中文词组且长度大于1
-			if currentType == 1 && currentWord.Len() > 0 {
-				chinesePhrase := currentWord.String()
-
-				// 简单的二三字词检测
-				if len(chinesePhrase) >= 4 {
-					// 每2个字符尝试作为一个词组
-					runes := []rune(chinesePhrase)
-					for i := 0; i < len(runes); i += 2 {
-						if i+1 < len(runes) {
-							result = append(result, string(runes[i:i+2]))
-						} else {
-							result = append(result, string(runes[i:]))
-						}
-					}
-				} else {
-					result = append(result, chinesePhrase)
-				}
-			} else {
-				// 非中文直接添加
-				if currentWord.Len() > 0 {
-					result = append(result, currentWord.String())
-				}
-			}
-
-			currentWord.Reset()
-		}
-
-		currentWord.WriteRune(char)
-		currentType = charType
-
-		// 针对中文单字，立即添加到结果
-		if charType == 1 && currentType == 1 && unicode.Is(unicode.Han, char) {
-			// 不再立即添加单个汉字，而是等待积累
-		}
+func handleIsExist(c *gin.Context) {
+	targetHash := c.Query("sha256")
+	if targetHash == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "缺少 sha256 查询参数"})
+		return
+	}
+	if len(targetHash) != 64 { // SHA256 哈希应为 64 个十六进制字符
+		c.JSON(http.StatusBadRequest, gin.H{"error": "无效的 sha256 哈希格式"})
+		return
 	}
 
-	// 处理最后一个单词
-	if currentWord.Len() > 0 {
-		if currentType == 1 {
-			// 中文词组处理
-			chinesePhrase := currentWord.String()
-			if len(chinesePhrase) >= 4 {
-				runes := []rune(chinesePhrase)
-				for i := 0; i < len(runes); i += 2 {
-					if i+1 < len(runes) {
-						result = append(result, string(runes[i:i+2]))
-					} else {
-						result = append(result, string(runes[i:]))
-					}
-				}
-			} else {
-				result = append(result, chinesePhrase)
-			}
+	var item ClipboardItem
+	found := false
+
+	// 使用 Rows 迭代以优化内存，避免一次性加载所有数据
+	rows, err := db.Model(&ClipboardItem{}).Rows()
+	if err != nil {
+		log.Printf("获取数据库行进行哈希检查时出错: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "数据库错误"})
+		return
+	}
+	defer rows.Close() // 确保在函数结束时关闭 rows
+
+	for rows.Next() {
+		// 逐行扫描数据
+		if err := db.ScanRows(rows, &item); err != nil {
+			log.Printf("扫描数据库行进行哈希检查时出错: %v", err)
+			continue // 跳过有问题的行
+		}
+
+		var dataToHash []byte
+		if item.Type == "image" {
+			dataToHash = item.ImageData
 		} else {
-			result = append(result, currentWord.String())
+			dataToHash = []byte(item.Content)
+		}
+
+		// 计算哈希
+		hasher := sha256.New()
+		hasher.Write(dataToHash)
+		calculatedHashBytes := hasher.Sum(nil)
+		calculatedHashHex := hex.EncodeToString(calculatedHashBytes)
+
+		// 比较哈希
+		if calculatedHashHex == targetHash {
+			found = true
+			break // 找到即退出循环
 		}
 	}
 
-	// 过滤空结果
-	var filteredResult []string
-	for _, word := range result {
-		if strings.TrimSpace(word) != "" {
-			filteredResult = append(filteredResult, word)
-		}
+	// 检查迭代过程中是否发生错误
+	if err := rows.Err(); err != nil {
+		log.Printf("迭代数据库行进行哈希检查时出错: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "数据库迭代错误"})
+		return
 	}
 
-	return filteredResult
+	c.JSON(http.StatusOK, gin.H{"exists": found})
 }
