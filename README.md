@@ -26,6 +26,7 @@
 - 🦥 懒加载优化体验
 - ☁️ 自动同步本地剪贴板到云端
 - 🔄 基于轮询的实时同步机制
+- 📦 基于sha256的防重复机制
 
 <br/>
 
@@ -38,6 +39,7 @@ npm install
 
 ### 2️⃣ 启动后端服务
 ```bash
+go mod tidy
 go run main.go
 ```
 🔔 默认监听端口：`5859`
@@ -55,6 +57,8 @@ npm run dev
 - 确保已安装Node.js和Go环境
 - 首次运行会自动创建数据库文件
 - 建议使用Chrome/Firefox等现代浏览器
+- 修改`.env.development`和`.env.production`为你的URL
+- 修改`main.go`里的`PASSWORD`为你自己的密码
 
 <br/>
 
