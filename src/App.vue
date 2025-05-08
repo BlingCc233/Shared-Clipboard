@@ -143,7 +143,7 @@
         </div>
 
         <div v-else class="clipboard-list" :key="newestItemId?.toString() || 'defaultKey'">
-        <div
+          <div
               v-for="(item, index) in clipboardItems"
               :key="item.id"
               class="clipboard-item"
@@ -236,6 +236,9 @@
       {{ notification.message }}
     </div>
   </div>
+  <button class="scroll-to-top-button" @click="scrollToTop"></button>
+
+
 </template>
 
 <script lang="ts">
@@ -420,15 +423,15 @@ export default defineComponent({
 
     // 启动轮询
     const startPolling = () => {
-            if (autoRefresh.value && pollingInterval.value === null) {
-              pollingInterval.value = window.setInterval(async () => {
-                if (isAuthenticated.value) {
-                  await fetchLastSharedContent(); // 定期更新共享剪贴板的最新记录
-                  await checkClipboard();
-                }
-              }, 1500);
+          if (autoRefresh.value && pollingInterval.value === null) {
+            pollingInterval.value = window.setInterval(async () => {
+              if (isAuthenticated.value) {
+                await fetchLastSharedContent(); // 定期更新共享剪贴板的最新记录
+                await checkClipboard();
+              }
+            }, 1500);
 
-            }
+          }
         }
     ;
 
@@ -726,8 +729,7 @@ export default defineComponent({
           if (!oldestItemId.value && sortedItems.length > 0) {
             oldestItemId.value = sortedItems[sortedItems.length - 1].id;
           }
-        }
-        else{
+        } else {
           const sortedItems = [...clipboardItems.value].sort((a, b) => b.id - a.id);
           newestItemId.value = sortedItems[0].id;
           lastSharedContent.value = sortedItems[0];
@@ -839,7 +841,7 @@ export default defineComponent({
     // 修改前端的splitAndShowWords函数
     const splitAndShowWords = async (text: string, index: number) => {
       try {
-        if(wordSplitResults.value[index].length > 0){
+        if (wordSplitResults.value[index].length > 0) {
           wordSplitResults.value[index] = [];
           return;
         }
@@ -997,8 +999,6 @@ export default defineComponent({
     };
 
 
-
-
     // Check if content exists on the server
     const checkContentExists = async (sha256: string): Promise<boolean> => {
       try {
@@ -1047,6 +1047,13 @@ export default defineComponent({
     const setSelectedImage = (file: File) => {
       selectedImage.value = file;
       createImagePreview();
+    };
+
+    const scrollToTop = () => {
+      window.scrollTo({
+        top: 0,
+        behavior: 'smooth' // 平滑滚动
+      });
     };
 
     return {
@@ -1107,6 +1114,9 @@ export default defineComponent({
 
       //image粘贴
       handlePaste,
+
+      // 其他返回的属性...
+      scrollToTop,
     };
   }
 });
@@ -1127,7 +1137,7 @@ export default defineComponent({
   --success-color: #2ecc71;
   --warning-color: #f39c12;
   --shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-  --border-radius: 8px;
+  --border-radius: 15px;
 }
 
 * {
@@ -1146,5 +1156,65 @@ body {
   padding: 0;
   width: 100%;
 }
+
+.scroll-to-top-button {
+  position: fixed;
+  bottom: 20px;
+  left: 20px;
+  width: 40px; /* 按钮宽度 */
+  height: 40px; /* 按钮高度 */
+  background-color: var(--primary-color);
+  color: white;
+  border: none;
+  border-radius: var(--border-radius);
+  cursor: pointer;
+  box-shadow: var(--shadow);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background-color 0.3s ease;
+}
+
+.scroll-to-top-button:hover {
+  background-color: var(--primary-dark);
+}
+
+/* 绘制箭头 */
+.scroll-to-top-button::before,
+.scroll-to-top-button::after {
+  content: '';
+  position: absolute;
+  width: 12px; /* 箭头宽度 */
+  height: 2px; /* 箭头厚度 */
+  background-color: white;
+  top: 50%;
+  left: 50%;
+  transform-origin: center;
+}
+
+/* 绘制左半边箭头 */
+.scroll-to-top-button::before {
+  transform: translate(-20%, -50%) rotate(45deg);
+}
+
+/* 绘制右半边箭头 */
+.scroll-to-top-button::after {
+  transform: translate(-80%, -50%) rotate(135deg);
+}
+
+/* 适配小屏幕设备 */
+@media (max-width: 768px) {
+  .scroll-to-top-button {
+    width: 36px; /* 缩小按钮 */
+    height: 36px;
+  }
+
+  .scroll-to-top-button::before,
+  .scroll-to-top-button::after {
+    width: 10px; /* 缩小箭头 */
+  }
+}
+
+
 
 </style>
