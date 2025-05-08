@@ -744,22 +744,21 @@ export default defineComponent({
       deviceInfo: string;
       imageData?: string;
     }) => {
-      let dataToHash : string | ArrayBuffer;
+      let dataToHash: string | Uint8Array;
       let sha256 = '';
       try {
-        if(data.type === 'image' && data.imageData){
+        if (data.type === 'image' && data.imageData) {
           dataToHash = base64ToArrayBuffer(data.imageData);
-        }
-        else if(data.type === 'text' && data.content){
-          dataToHash = data.content;
-        }else {
+        } else if (data.type === 'text' && data.content) {
+          dataToHash = data.content; // 直接使用字符串
+        } else {
           throw new Error('Invalid data');
         }
         sha256 = await calculateSHA256(dataToHash);
         const exists = await checkContentExists(sha256);
 
-        if(exists){
-          showNotification('内容已存在','info');
+        if (exists) {
+          showNotification('内容已存在', 'info');
           return;
         }
         await axios.post(`${API_URL}/api/clipboard`, data, {
@@ -772,6 +771,7 @@ export default defineComponent({
         console.error('Error syncing clipboard content:', error);
       }
     };
+
 
     // 处理图片选择
     const handleImageSelect = (event: Event) => {
@@ -967,30 +967,36 @@ export default defineComponent({
     };
 
     // Convert Base64 string to ArrayBuffer
-    const base64ToArrayBuffer = (base64: string): ArrayBuffer => {
+    const base64ToArrayBuffer = (base64: string): Uint8Array => {
       const binaryString = window.atob(base64);
       const len = binaryString.length;
       const bytes = new Uint8Array(len);
       for (let i = 0; i < len; i++) {
         bytes[i] = binaryString.charCodeAt(i);
       }
-      return bytes.buffer;
-    }
+      return bytes;
+    };
+
 
     // Calculate SHA256 hash
-    const calculateSHA256 = async (input: string | ArrayBuffer): Promise<string> => {
+    const calculateSHA256 = async (input: string | Uint8Array): Promise<string> => {
       try {
         const data = typeof input === 'string' ? new TextEncoder().encode(input) : input;
         const hashBuffer = await crypto.subtle.digest('SHA-256', data);
         const hashArray = Array.from(new Uint8Array(hashBuffer));
         const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+        if (hashHex.length !== 64) {
+          throw new Error("Invalid SHA256 hash length");
+        }
         return hashHex;
       } catch (error) {
         console.error("SHA256 calculation failed:", error);
         showNotification("无法计算内容的校验和", "error");
-        throw new Error("SHA256 calculation failed"); // Re-throw to stop upload process
+        throw new Error("SHA256 calculation failed");
       }
     };
+
+
 
 
     // Check if content exists on the server
