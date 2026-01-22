@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/sha256"
+	"errors"
 	"encoding/hex"
 	"github.com/dgrijalva/jwt-go"
 	"github.com/gin-contrib/cors"
@@ -12,6 +13,7 @@ import (
 	"net/http"
 	"regexp"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -21,6 +23,7 @@ type ClipboardItem struct {
 	Content    string `json:"content"`
 	DeviceInfo string `json:"deviceInfo"`
 	Type       string `json:"type"`                // text 或 image
+	Hash       string `json:"hash" gorm:"index"`   // sha256 hex of normalized content/image bytes, used for dedup
 	ImageData  []byte `json:"imageData,omitempty"` // 仅当 Type 为 image 时使用
 }
 
@@ -45,12 +48,86 @@ func main() {
 
 	// 自动迁移
 	db.AutoMigrate(&ClipboardItem{})
+	ensureClipboardItemHashes()
 
 	// 初始化路由
 	router := setupRouter()
 
 	// 启动服务
 	router.Run("0.0.0.0:5859")
+}
+
+func normalizeTextForHash(text string) string {
+	// Normalize common cross-platform clipboard newline differences (CRLF/CR -> LF).
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	text = strings.ReplaceAll(text, "\r", "\n")
+	return text
+}
+
+func computeClipboardHash(itemType string, content string, imageData []byte) (string, error) {
+	var data []byte
+	switch itemType {
+	case "image":
+		if len(imageData) == 0 {
+			return "", errors.New("missing imageData")
+		}
+		data = imageData
+	case "text":
+		data = []byte(normalizeTextForHash(content))
+	default:
+		return "", errors.New("invalid type")
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:]), nil
+}
+
+func clipboardItemToResponse(item ClipboardItem) map[string]interface{} {
+	itemMap := map[string]interface{}{
+		"id":         item.ID,
+		"content":    item.Content,
+		"deviceInfo": item.DeviceInfo,
+		"type":       item.Type,
+		"createdAt":  item.CreatedAt,
+	}
+	if item.Type == "image" {
+		itemMap["imageData"] = item.ImageData
+	}
+	return itemMap
+}
+
+func ensureClipboardItemHashes() {
+	// Best-effort backfill so /api/is_exist and insert-dedup can use fast indexed lookups.
+	rows, err := db.Model(&ClipboardItem{}).
+		Select("id", "type", "content", "image_data", "hash").
+		Where("hash = '' OR hash IS NULL").
+		Rows()
+	if err != nil {
+		log.Printf("Failed to iterate clipboard items for hash backfill: %v", err)
+		return
+	}
+	defer rows.Close()
+
+	var item ClipboardItem
+	for rows.Next() {
+		if err := db.ScanRows(rows, &item); err != nil {
+			log.Printf("Failed to scan clipboard item for hash backfill: %v", err)
+			continue
+		}
+
+		calculatedHash, err := computeClipboardHash(item.Type, item.Content, item.ImageData)
+		if err != nil {
+			log.Printf("Failed to compute hash for item %d: %v", item.ID, err)
+			continue
+		}
+
+		if err := db.Model(&ClipboardItem{}).Where("id = ?", item.ID).Update("hash", calculatedHash).Error; err != nil {
+			log.Printf("Failed to update hash for item %d: %v", item.ID, err)
+		}
+	}
+
+	if err := rows.Err(); err != nil {
+		log.Printf("Error iterating clipboard items for hash backfill: %v", err)
+	}
 }
 
 // 初始化路由
@@ -75,6 +152,7 @@ func setupRouter() *gin.Engine {
 	api.Use(authMiddleware())
 	{
 		api.GET("/clipboard", handleGetClipboard)
+		api.GET("/clipboard/search", handleSearchClipboard)
 		api.POST("/split-words", handleSplitWords)
 		api.POST("/clipboard", handlePostClipboard)
 		api.GET("/clipboard/latest", handleGetLatestClipboard)
@@ -131,7 +209,11 @@ func handleGetClipboard(c *gin.Context) {
 		// 如果 old 参数为空，获取数据库中最新的 id
 		var latestItem ClipboardItem
 		if err := db.Order("id DESC").First(&latestItem).Error; err != nil {
-			c.JSON(http.StatusNotFound, gin.H{"error": "No clipboard items found"})
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				c.JSON(http.StatusOK, []map[string]interface{}{})
+				return
+			}
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to query clipboard items"})
 			return
 		}
 		oldID = uint64(latestItem.ID) + 1
@@ -151,17 +233,49 @@ func handleGetClipboard(c *gin.Context) {
 	// 构造响应
 	var response []map[string]interface{}
 	for _, item := range items {
-		itemMap := map[string]interface{}{
-			"id":         item.ID,
-			"content":    item.Content,
-			"deviceInfo": item.DeviceInfo,
-			"type":       item.Type,
-			"createdAt":  item.CreatedAt,
+		response = append(response, clipboardItemToResponse(item))
+	}
+
+	c.JSON(http.StatusOK, response)
+}
+
+// 搜索剪贴板项目处理函数
+func handleSearchClipboard(c *gin.Context) {
+	query := strings.TrimSpace(c.Query("q"))
+	if query == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Missing q parameter"})
+		return
+	}
+
+	limit := 50
+	if limitParam := strings.TrimSpace(c.Query("limit")); limitParam != "" {
+		parsedLimit, err := strconv.Atoi(limitParam)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid limit parameter"})
+			return
 		}
-		if item.Type == "image" {
-			itemMap["imageData"] = item.ImageData
+		if parsedLimit < 1 {
+			parsedLimit = 1
 		}
-		response = append(response, itemMap)
+		if parsedLimit > 200 {
+			parsedLimit = 200
+		}
+		limit = parsedLimit
+	}
+
+	likeQuery := "%" + query + "%"
+	var items []ClipboardItem
+	if err := db.Where("content LIKE ? OR device_info LIKE ?", likeQuery, likeQuery).
+		Order("id DESC").
+		Limit(limit).
+		Find(&items).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to search clipboard items"})
+		return
+	}
+
+	var response []map[string]interface{}
+	for _, item := range items {
+		response = append(response, clipboardItemToResponse(item))
 	}
 
 	c.JSON(http.StatusOK, response)
@@ -179,7 +293,7 @@ func handleSplitWords(c *gin.Context) {
 	}
 
 	words := splitWords(req.Text)
-	c.JSON(http.StatusBadRequest, gin.H{"words": words})
+	c.JSON(http.StatusOK, gin.H{"words": words})
 }
 
 // 添加剪贴板项目处理函数
@@ -196,10 +310,27 @@ func handlePostClipboard(c *gin.Context) {
 		return
 	}
 
+	calculatedHash, err := computeClipboardHash(req.Type, req.Content, req.ImageData)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid clipboard payload"})
+		return
+	}
+
+	// Server-side dedup: prevents duplicates even under polling overlap / network retries.
+	var existing ClipboardItem
+	if err := db.Where("hash = ?", calculatedHash).Order("id DESC").First(&existing).Error; err == nil {
+		c.JSON(http.StatusOK, clipboardItemToResponse(existing))
+		return
+	} else if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
+		return
+	}
+
 	item := ClipboardItem{
 		Content:    req.Content,
 		DeviceInfo: req.DeviceInfo,
 		Type:       req.Type,
+		Hash:       calculatedHash,
 	}
 
 	if req.Type == "image" {
@@ -207,7 +338,7 @@ func handlePostClipboard(c *gin.Context) {
 	}
 
 	db.Create(&item)
-	c.JSON(http.StatusCreated, item)
+	c.JSON(http.StatusCreated, clipboardItemToResponse(item))
 }
 
 // 获取最新剪贴板项目处理函数
@@ -234,17 +365,7 @@ func handleGetLatestClipboard(c *gin.Context) {
 	// 构造响应
 	var response []map[string]interface{}
 	for _, item := range items {
-		itemMap := map[string]interface{}{
-			"id":         item.ID,
-			"content":    item.Content,
-			"deviceInfo": item.DeviceInfo,
-			"type":       item.Type,
-			"createdAt":  item.CreatedAt,
-		}
-		if item.Type == "image" {
-			itemMap["imageData"] = item.ImageData
-		}
-		response = append(response, itemMap)
+		response = append(response, clipboardItemToResponse(item))
 	}
 
 	c.JSON(http.StatusOK, response)
@@ -259,7 +380,12 @@ func authMiddleware() gin.HandlerFunc {
 			return
 		}
 
-		tokenString := authHeader[len("Bearer "):]
+		const bearerPrefix = "Bearer "
+		if !strings.HasPrefix(authHeader, bearerPrefix) || len(authHeader) <= len(bearerPrefix) {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Invalid authorization header"})
+			return
+		}
+		tokenString := authHeader[len(bearerPrefix):]
 
 		claims := &Claims{}
 		token, err := jwt.ParseWithClaims(tokenString, claims, func(token *jwt.Token) (interface{}, error) {
@@ -298,11 +424,22 @@ func handleIsExist(c *gin.Context) {
 		return
 	}
 
-	var item ClipboardItem
-	found := false
+	var count int64
+	if err := db.Model(&ClipboardItem{}).Where("hash = ?", targetHash).Count(&count).Error; err != nil {
+		log.Printf("查询数据库进行哈希检查时出错: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "数据库错误"})
+		return
+	}
+	if count > 0 {
+		c.JSON(http.StatusOK, gin.H{"exists": true})
+		return
+	}
 
-	// 使用 Rows 迭代以优化内存，避免一次性加载所有数据
-	rows, err := db.Model(&ClipboardItem{}).Rows()
+	// Fallback: backfill and check rows with missing hash (older DBs).
+	rows, err := db.Model(&ClipboardItem{}).
+		Select("id", "type", "content", "image_data", "hash").
+		Where("hash = '' OR hash IS NULL").
+		Rows()
 	if err != nil {
 		log.Printf("获取数据库行进行哈希检查时出错: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "数据库错误"})
@@ -310,30 +447,27 @@ func handleIsExist(c *gin.Context) {
 	}
 	defer rows.Close() // 确保在函数结束时关闭 rows
 
+	var item ClipboardItem
 	for rows.Next() {
-		// 逐行扫描数据
 		if err := db.ScanRows(rows, &item); err != nil {
 			log.Printf("扫描数据库行进行哈希检查时出错: %v", err)
 			continue // 跳过有问题的行
 		}
 
-		var dataToHash []byte
-		if item.Type == "image" {
-			dataToHash = item.ImageData
-		} else {
-			dataToHash = []byte(item.Content)
+		calculatedHashHex, err := computeClipboardHash(item.Type, item.Content, item.ImageData)
+		if err != nil {
+			continue
 		}
 
-		// 计算哈希
-		hasher := sha256.New()
-		hasher.Write(dataToHash)
-		calculatedHashBytes := hasher.Sum(nil)
-		calculatedHashHex := hex.EncodeToString(calculatedHashBytes)
+		// Backfill for future fast checks.
+		if err := db.Model(&ClipboardItem{}).Where("id = ?", item.ID).Update("hash", calculatedHashHex).Error; err != nil {
+			log.Printf("更新剪贴板哈希时出错 (id=%d): %v", item.ID, err)
+		}
 
 		// 比较哈希
 		if calculatedHashHex == targetHash {
-			found = true
-			break // 找到即退出循环
+			c.JSON(http.StatusOK, gin.H{"exists": true})
+			return
 		}
 	}
 
@@ -344,5 +478,5 @@ func handleIsExist(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"exists": found})
+	c.JSON(http.StatusOK, gin.H{"exists": false})
 }

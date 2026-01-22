@@ -22,3 +22,8 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+clipboard_backend/clipboard.db
+clipboard_backend/main
+.gitignore
+.gitignore
+.gitignore
